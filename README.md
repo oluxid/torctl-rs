@@ -1,45 +1,62 @@
-## Description
+# torctl
 
-Script to redirect all traffic through tor network including dns queries
-for anonymizing entire system
+`torctl` redirects system traffic, including DNS queries, through the Tor
+network. The command-line tool is implemented in Rust and targets Linux
+systems using `systemd`, `iptables`, and the standard Tor service.
 
-## Installation
+## Requirements
 
-`pacman -S torctl`
+- Rust 1.74 or newer
+- Linux with `systemd` and `iptables`
+- Tor installed as the `tor` system service
+- `macchanger` for `chngmac` and `rvmac`
+- `smem-secure-delete` for `wipe`
+
+The commands that change firewall, service, network, or kernel state must be
+run as root.
+
+## Build and installation
+
+```sh
+cargo build --release
+install -Dm755 target/release/torctl /usr/bin/torctl
+install -Dm644 service/torctl-autostart.service /usr/lib/systemd/system/torctl-autostart.service
+install -Dm644 service/torctl-autowipe.service /usr/lib/systemd/system/torctl-autowipe.service
+install -Dm644 bash-completion/torctl /usr/share/bash-completion/completions/torctl
+systemctl daemon-reload
+```
 
 ## Usage
 
-```
-$ torctl
---==[ torctl.sh by blackarch.org ]==--
-
-Usage: torctl.sh COMMAND
-
-A script to redirect all traffic through tor network
+```text
+torctl <COMMAND>
 
 Commands:
-  start      - start tor and redirect all traffic through tor
-  stop       - stop tor and redirect all traffic through clearnet
-  status     - get tor service status
-  restart    - restart tor and traffic rules
-  autowipe   - enable memory wipe at shutdown
-  autostart  - start torctl at startup
-  ip         - get remote ip address
-  chngid     - change tor identity
-  chngmac    - change mac addresses of all interfaces
-  rvmac      - revert mac addresses of all interfaces
-  version    - print version of torctl and exit
-
+  start      Start Tor and redirect all traffic through Tor
+  stop       Stop Tor and restore the previous network configuration
+  status     Show torctl, Tor, autostart, and autowipe status
+  restart    Stop and start torctl
+  autowipe   Enable memory wiping at shutdown
+  autostart  Enable torctl at startup
+  ip         Print the current remote IP address
+  chngid     Change the Tor identity
+  chngmac    Randomize MAC addresses on all non-loopback interfaces
+  rvmac      Restore permanent MAC addresses
+  version    Print the torctl version
+  wipe       Wipe memory and secure-delete temporary data
 ```
 
-## Get Involved
+`start` backs up `/etc/tor/torrc`, `/etc/resolv.conf`, the current iptables
+rules, and current sysctl values under `/var/lib/torctl`. `stop` restores those
+backups. Do not manually edit or remove that directory while torctl is active.
 
-You can get in touch with the BlackArch Linux team. Just check out the following:
+## Development
 
-**Please, send us pull requests!**
+```sh
+cargo fmt --check
+cargo check
+```
 
-**Web:** https://www.blackarch.org/
+## License
 
-**Mail:** team@blackarch.org
-
-**IRC:** [irc://irc.freenode.net/blackarch](irc://irc.freenode.net/blackarch)
+torctl is distributed under the GNU General Public License, version 3 or later.

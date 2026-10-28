@@ -1,0 +1,12 @@
+[package]
+name = "torctl"
+version = "0.5.7"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "Redirect system traffic through the Tor network"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+
