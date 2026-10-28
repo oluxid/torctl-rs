@@ -60,6 +60,9 @@ jobs:
       contents: write
 
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Create or update draft release
         env:
           GH_TOKEN: ${{ github.token }}
