@@ -1,6 +1,7 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
@@ -13,6 +14,53 @@ const TOR_UID: &str = "tor";
 const TOR_PORT: &str = "9040";
 const TOR_DNS: &str = "9053";
 const TOR_PASSWORD: &str = "16:FDE8ED505C45C8BA602385E2CA5B3250ED00AC0920FEC1230813A1F86F";
+const SYSCTL_SETTINGS: &[(&str, &str)] = &[
+    ("net.ipv4.tcp_ecn", "1"),
+    ("net.ipv4.tcp_window_scaling", "1"),
+    ("net.ipv4.tcp_rmem", "8192 87380 16777216"),
+    ("net.ipv4.tcp_wmem", "8192 65536 16777216"),
+    ("net.core.rmem_max", "16777216"),
+    ("net.core.wmem_max", "16777216"),
+    ("net.core.netdev_max_backlog", "16384"),
+    ("net.core.dev_weight", "64"),
+    ("net.core.somaxconn", "32768"),
+    ("net.core.optmem_max", "65535"),
+    ("net.ipv4.tcp_max_tw_buckets", "1440000"),
+    ("net.ipv4.tcp_tw_reuse", "1"),
+    ("net.ipv4.tcp_max_orphans", "16384"),
+    ("net.ipv4.tcp_orphan_retries", "0"),
+    ("net.ipv4.tcp_no_metrics_save", "1"),
+    ("net.ipv4.tcp_moderate_rcvbuf", "1"),
+    ("net.unix.max_dgram_qlen", "50"),
+    ("net.ipv4.neigh.default.gc_thresh3", "2048"),
+    ("net.ipv4.neigh.default.gc_thresh2", "1024"),
+    ("net.ipv4.neigh.default.gc_thresh1", "32"),
+    ("net.ipv4.neigh.default.gc_interval", "30"),
+    ("net.ipv4.neigh.default.proxy_qlen", "96"),
+    ("net.ipv4.neigh.default.unres_qlen", "6"),
+    ("net.ipv4.tcp_reordering", "3"),
+    ("net.ipv4.tcp_retries2", "15"),
+    ("net.ipv4.tcp_retries1", "3"),
+    ("net.ipv4.tcp_slow_start_after_idle", "0"),
+    ("net.ipv4.tcp_fastopen", "3"),
+    ("net.ipv4.tcp_syncookies", "1"),
+    ("net.ipv4.tcp_rfc1337", "1"),
+    ("net.ipv4.conf.default.rp_filter", "1"),
+    ("net.ipv4.conf.all.rp_filter", "1"),
+    ("net.ipv4.conf.default.log_martians", "1"),
+    ("net.ipv4.conf.all.log_martians", "1"),
+    ("net.ipv4.conf.all.accept_redirects", "0"),
+    ("net.ipv4.conf.default.accept_redirects", "0"),
+    ("net.ipv4.conf.all.secure_redirects", "0"),
+    ("net.ipv4.conf.default.secure_redirects", "0"),
+    ("net.ipv6.conf.all.accept_redirects", "0"),
+    ("net.ipv6.conf.default.accept_redirects", "0"),
+    ("net.ipv4.conf.all.send_redirects", "0"),
+    ("net.ipv4.conf.default.send_redirects", "0"),
+    ("net.ipv4.icmp_echo_ignore_all", "1"),
+    ("net.ipv6.conf.all.disable_ipv6", "1"),
+    ("net.ipv6.conf.default.disable_ipv6", "1"),
+];
 
 #[derive(Parser)]
 #[command(name = "torctl", version = VERSION, about = "Redirect all traffic through the Tor network")]
@@ -84,6 +132,18 @@ fn start() -> Result<()> {
     if started() {
         bail!("torctl is already started");
     }
+    let tor_was_active = systemctl_state("tor", "is-active")? == "active";
+    let result = start_inner();
+    if let Err(error) = result {
+        rollback_start(tor_was_active)
+            .context("startup failed and rollback could not fully restore the system")?;
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn start_inner() -> Result<()> {
+    backup_sysctl()?;
     backup_file(TORRC, "torrc.bak", "tor config")?;
     backup_file("/etc/resolv.conf", "resolv.conf.bak", "nameservers")?;
     run_to_file(
@@ -91,12 +151,6 @@ fn start() -> Result<()> {
         &[],
         backup_path("iptables.rules.bak"),
         "iptables rules",
-    )?;
-    run_to_file(
-        "sysctl",
-        &["-a"],
-        backup_path("sysctl.conf.bak"),
-        "sysctl rules",
     )?;
     run("iptables", &["-F"])?;
     run("iptables", &["-t", "nat", "-F"])?;
@@ -107,6 +161,42 @@ fn start() -> Result<()> {
     apply_sysctl_rules()?;
     msg("all traffic is being redirected through tor");
     fs::write(backup_path("started"), []).context("recording torctl state")?;
+    Ok(())
+}
+
+fn rollback_start(tor_was_active: bool) -> Result<()> {
+    let mut errors = Vec::new();
+    if let Err(error) = restore_sysctl() {
+        errors.push(format!("sysctl: {error:#}"));
+    }
+    if Path::new(&backup_path("iptables.rules.bak")).exists() {
+        if let Err(error) = run("iptables", &["-F"]) {
+            errors.push(format!("flushing iptables: {error:#}"));
+        }
+        if let Err(error) = run("iptables", &["-t", "nat", "-F"]) {
+            errors.push(format!("flushing iptables nat table: {error:#}"));
+        }
+        if let Err(error) = restore_iptables() {
+            errors.push(format!("iptables: {error:#}"));
+        }
+    }
+    if let Err(error) = restore_file(TORRC, "torrc.bak", "tor config") {
+        errors.push(format!("tor config: {error:#}"));
+    }
+    if let Err(error) = restore_file("/etc/resolv.conf", "resolv.conf.bak", "nameservers") {
+        errors.push(format!("nameservers: {error:#}"));
+    }
+    let service_result = if tor_was_active {
+        start_service("tor")
+    } else {
+        stop_service("tor")
+    };
+    if let Err(error) = service_result {
+        errors.push(format!("tor service: {error:#}"));
+    }
+    if !errors.is_empty() {
+        bail!("rollback errors: {}", errors.join("; "));
+    }
     Ok(())
 }
 
@@ -341,53 +431,7 @@ fn apply_iptables_rules() -> Result<()> {
 
 fn apply_sysctl_rules() -> Result<()> {
     info("applying sysctl rules");
-    let settings = [
-        ("net.ipv4.tcp_ecn", "1"),
-        ("net.ipv4.tcp_window_scaling", "1"),
-        ("net.ipv4.tcp_rmem", "8192 87380 16777216"),
-        ("net.ipv4.tcp_wmem", "8192 65536 16777216"),
-        ("net.core.rmem_max", "16777216"),
-        ("net.core.wmem_max", "16777216"),
-        ("net.core.netdev_max_backlog", "16384"),
-        ("net.core.dev_weight", "64"),
-        ("net.core.somaxconn", "32768"),
-        ("net.core.optmem_max", "65535"),
-        ("net.ipv4.tcp_max_tw_buckets", "1440000"),
-        ("net.ipv4.tcp_tw_reuse", "1"),
-        ("net.ipv4.tcp_max_orphans", "16384"),
-        ("net.ipv4.tcp_orphan_retries", "0"),
-        ("net.ipv4.tcp_no_metrics_save", "1"),
-        ("net.ipv4.tcp_moderate_rcvbuf", "1"),
-        ("net.unix.max_dgram_qlen", "50"),
-        ("net.ipv4.neigh.default.gc_thresh3", "2048"),
-        ("net.ipv4.neigh.default.gc_thresh2", "1024"),
-        ("net.ipv4.neigh.default.gc_thresh1", "32"),
-        ("net.ipv4.neigh.default.gc_interval", "30"),
-        ("net.ipv4.neigh.default.proxy_qlen", "96"),
-        ("net.ipv4.neigh.default.unres_qlen", "6"),
-        ("net.ipv4.tcp_reordering", "3"),
-        ("net.ipv4.tcp_retries2", "15"),
-        ("net.ipv4.tcp_retries1", "3"),
-        ("net.ipv4.tcp_slow_start_after_idle", "0"),
-        ("net.ipv4.tcp_fastopen", "3"),
-        ("net.ipv4.tcp_syncookies", "1"),
-        ("net.ipv4.tcp_rfc1337", "1"),
-        ("net.ipv4.conf.default.rp_filter", "1"),
-        ("net.ipv4.conf.all.rp_filter", "1"),
-        ("net.ipv4.conf.default.log_martians", "1"),
-        ("net.ipv4.conf.all.log_martians", "1"),
-        ("net.ipv4.conf.all.accept_redirects", "0"),
-        ("net.ipv4.conf.default.accept_redirects", "0"),
-        ("net.ipv4.conf.all.secure_redirects", "0"),
-        ("net.ipv4.conf.default.secure_redirects", "0"),
-        ("net.ipv6.conf.all.accept_redirects", "0"),
-        ("net.ipv6.conf.default.accept_redirects", "0"),
-        ("net.ipv4.conf.all.send_redirects", "0"),
-        ("net.ipv4.conf.default.send_redirects", "0"),
-        ("net.ipv4.icmp_echo_ignore_all", "1"),
-        ("net.ipv6.conf.all.disable_ipv6", "1"),
-        ("net.ipv6.conf.default.disable_ipv6", "1"),
-    ];
+    let settings = SYSCTL_SETTINGS;
     for (key, value) in settings {
         run("sysctl", &["-w", &format!("{key}={value}")])?;
     }
@@ -404,19 +448,52 @@ fn write_torrc() -> Result<()> {
 }
 
 fn write_resolv_conf() -> Result<()> {
-    fs::write("/etc/resolv.conf", "# generated by torctl\nnameserver 127.0.0.1\nnameserver 1.1.1.1\nnameserver 1.0.0.1\nnameserver 208.67.222.222\nnameserver 208.67.220.220\nnameserver 8.8.8.8\nnameserver 8.8.4.4\n").context("writing resolv.conf")
+    let path = Path::new("/etc/resolv.conf");
+    let temporary = path.with_extension("torctl.tmp");
+    fs::write(
+        &temporary,
+        "# generated by torctl\nnameserver 127.0.0.1\nnameserver 1.1.1.1\nnameserver 1.0.0.1\nnameserver 208.67.222.222\nnameserver 208.67.220.220\nnameserver 8.8.8.8\nnameserver 8.8.4.4\n",
+    )
+    .context("writing temporary resolv.conf")?;
+    fs::rename(&temporary, path).context("installing resolv.conf")
 }
 
 fn backup_file(source: &str, name: &str, description: &str) -> Result<()> {
     warn(&format!("backing up {description}"));
-    fs::rename(source, backup_path(name)).with_context(|| format!("backing up {source}"))?;
+    let source_path = Path::new(source);
+    let destination = backup_path(name);
+    if let Ok(target) = fs::read_link(source_path) {
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(target, &destination)
+                .with_context(|| format!("backing up {source}"))?;
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = target;
+            bail!("backing up symlink {source} is unsupported on this platform");
+        }
+    } else {
+        fs::copy(source_path, &destination).with_context(|| format!("backing up {source}"))?;
+    }
     msg(&format!("backed up {description}"));
+    Ok(())
+}
+
+fn backup_sysctl() -> Result<()> {
+    info("backing up sysctl rules");
+    let path = backup_path("sysctl.conf.bak");
+    let mut file = fs::File::create(path).context("creating sysctl backup")?;
+    for (key, _) in SYSCTL_SETTINGS {
+        let value = command_output("sysctl", &["-n", key])?;
+        writeln!(file, "{key} = {}", value.trim()).context("writing sysctl backup")?;
+    }
     Ok(())
 }
 
 fn restore_file(destination: &str, name: &str, description: &str) -> Result<()> {
     let backup = backup_path(name);
-    if Path::new(&backup).exists() {
+    if fs::symlink_metadata(&backup).is_ok() {
         warn(&format!("restoring {description}"));
         let _ = fs::remove_file(destination);
         fs::rename(&backup, destination).with_context(|| format!("restoring {destination}"))?;
@@ -517,11 +594,14 @@ fn run(program: &str, args: &[&str]) -> Result<()> {
 
 fn run_to_file(program: &str, args: &[&str], path: PathBuf, description: &str) -> Result<()> {
     info(&format!("backing up {description}"));
-    let file = fs::File::create(path)?;
+    let temporary = path.with_extension("tmp");
+    let file = fs::File::create(&temporary)?;
     let status = Command::new(program).args(args).stdout(file).status()?;
     if !status.success() {
+        let _ = fs::remove_file(temporary);
         bail!("{program} failed with {status}");
     }
+    fs::rename(temporary, path)?;
     Ok(())
 }
 

@@ -47,8 +47,11 @@ Commands:
 ```
 
 `start` backs up `/etc/tor/torrc`, `/etc/resolv.conf`, the current iptables
-rules, and current sysctl values under `/var/lib/torctl`. `stop` restores those
-backups. Do not manually edit or remove that directory while torctl is active.
+rules, and the sysctl values that torctl changes under `/var/lib/torctl`.
+Resolver files are copied without removing the live file, and symlinks are
+preserved. If startup fails, torctl restores the changes made during that
+attempt; `stop` restores the backups from a successful start. Do not manually
+edit or remove that directory while torctl is active.
 
 ## Development
 
