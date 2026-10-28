@@ -6,7 +6,7 @@ use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
-const VERSION: &str = "torctl 0.5.7";
+const VERSION: &str = concat!("torctl ", env!("CARGO_PKG_VERSION"));
 const BACKUP_DIR: &str = "/var/lib/torctl";
 const TORRC: &str = "/etc/tor/torrc";
 const TOR_UID: &str = "tor";
