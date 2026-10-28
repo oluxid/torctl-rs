@@ -57,6 +57,12 @@ cargo fmt --check
 cargo check
 ```
 
+GitHub Actions runs formatting, Clippy, builds, and tests for pushes and pull
+requests. A version tag such as `v0.5.7` validates the crate, creates a draft
+GitHub release, uploads Linux binaries for x86_64 and ARM64, publishes the
+crate to crates.io, and then publishes the GitHub release. The
+`CRATES_IO_TOKEN` repository secret is required for tagged releases.
+
 ## License
 
 torctl is distributed under the GNU General Public License, version 3 or later.
