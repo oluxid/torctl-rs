@@ -204,14 +204,38 @@ fn stop() -> Result<()> {
     if !started() {
         bail!("torctl is already stopped");
     }
-    restore_sysctl()?;
-    run("iptables", &["-F"])?;
-    run("iptables", &["-t", "nat", "-F"])?;
-    restore_iptables()?;
-    stop_service("tor")?;
-    restore_file(TORRC, "torrc.bak", "tor config")?;
-    restore_file("/etc/resolv.conf", "resolv.conf.bak", "nameservers")?;
-    fs::remove_file(backup_path("started")).ok();
+
+    let mut errors = Vec::new();
+    if let Err(error) = restore_sysctl() {
+        errors.push(format!("sysctl: {error:#}"));
+    }
+    if let Err(error) = run("iptables", &["-F"]) {
+        errors.push(format!("flushing iptables: {error:#}"));
+    }
+    if let Err(error) = run("iptables", &["-t", "nat", "-F"]) {
+        errors.push(format!("flushing iptables nat table: {error:#}"));
+    }
+    if let Err(error) = restore_iptables() {
+        errors.push(format!("iptables: {error:#}"));
+    }
+    if let Err(error) = stop_service("tor") {
+        errors.push(format!("tor service: {error:#}"));
+    }
+    if let Err(error) = restore_file(TORRC, "torrc.bak", "tor config") {
+        errors.push(format!("tor config: {error:#}"));
+    }
+    if let Err(error) = restore_file("/etc/resolv.conf", "resolv.conf.bak", "nameservers") {
+        errors.push(format!("nameservers: {error:#}"));
+    }
+
+    if errors.is_empty() {
+        if let Err(error) = fs::remove_file(backup_path("started")) {
+            errors.push(format!("removing started marker: {error:#}"));
+        }
+    }
+    if !errors.is_empty() {
+        bail!("stop errors: {}", errors.join("; "));
+    }
     Ok(())
 }
 
