@@ -493,11 +493,50 @@ fn backup_sysctl() -> Result<()> {
 
 fn restore_file(destination: &str, name: &str, description: &str) -> Result<()> {
     let backup = backup_path(name);
-    if fs::symlink_metadata(&backup).is_ok() {
-        warn(&format!("restoring {description}"));
-        let _ = fs::remove_file(destination);
-        fs::rename(&backup, destination).with_context(|| format!("restoring {destination}"))?;
-        msg(&format!("restored {description}"));
+    if fs::symlink_metadata(&backup).is_err() {
+        return Ok(());
+    }
+
+    warn(&format!("restoring {description}"));
+    let destination_path = Path::new(destination);
+    let temporary = destination_path.with_file_name(format!(
+        ".{}.torctl-restore",
+        destination_path
+            .file_name()
+            .context("destination has no file name")?
+            .to_string_lossy()
+    ));
+
+    if let Err(error) = stage_restore(&backup, &temporary) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error).with_context(|| format!("restoring {destination}"));
+    }
+
+    if let Err(error) = fs::rename(&temporary, destination_path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error).with_context(|| format!("restoring {destination}"));
+    }
+
+    fs::remove_file(&backup).with_context(|| format!("removing restored backup {backup:?}"))?;
+    msg(&format!("restored {description}"));
+    Ok(())
+}
+
+fn stage_restore(backup: &Path, temporary: &Path) -> Result<()> {
+    if fs::symlink_metadata(backup)?.file_type().is_symlink() {
+        let target = fs::read_link(backup).context("reading symlink backup")?;
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(target, temporary)
+                .context("creating temporary restored symlink")?;
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = target;
+            bail!("restoring symlink backups is unsupported on this platform");
+        }
+    } else {
+        fs::copy(backup, temporary).context("copying backup to destination filesystem")?;
     }
     Ok(())
 }
