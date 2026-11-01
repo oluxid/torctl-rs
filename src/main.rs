@@ -845,7 +845,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn backup_file_to_preserves_symlink() {
-        use std::os::unix::fs::{symlink, symlink_metadata};
+        use std::os::unix::fs::symlink;
 
         let dir = test_dir("backup-symlink");
         let target = dir.join("original-config");
@@ -858,7 +858,7 @@ mod tests {
         backup_file_to(&source, &destination, "test symlink").unwrap();
 
         // The backup must itself be a symlink.
-        assert!(symlink_metadata(&destination)
+        assert!(fs::symlink_metadata(&destination)
             .unwrap()
             .file_type()
             .is_symlink());
