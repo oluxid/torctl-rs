@@ -142,8 +142,23 @@ fn start() -> Result<()> {
     Ok(())
 }
 
+fn ensure_torrc_exists() -> Result<()> {
+    let path = Path::new(TORRC);
+
+    if !path.exists() {
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .with_context(|| format!("creating missing Tor config: {}", path.display()))?;
+    }
+
+    Ok(())
+}
+
 fn start_inner() -> Result<()> {
     backup_sysctl()?;
+    ensure_torrc_exists()?;
     backup_file(TORRC, "torrc.bak", "tor config")?;
     backup_file("/etc/resolv.conf", "resolv.conf.bak", "nameservers")?;
     run_to_file(
@@ -458,24 +473,34 @@ fn write_resolv_conf() -> Result<()> {
     fs::rename(&temporary, path).context("installing resolv.conf")
 }
 
-fn backup_file(source: &str, name: &str, description: &str) -> Result<()> {
-    warn(&format!("backing up {description}"));
-    let source_path = Path::new(source);
-    let destination = backup_path(name);
-    if let Ok(target) = fs::read_link(source_path) {
+fn backup_file_to(source: &Path, destination: &Path, source_label: &str) -> Result<()> {
+    if let Ok(target) = fs::read_link(source) {
         #[cfg(unix)]
         {
-            std::os::unix::fs::symlink(target, &destination)
-                .with_context(|| format!("backing up {source}"))?;
+            std::os::unix::fs::symlink(target, destination)
+                .with_context(|| format!("backing up {source_label}"))?;
         }
+
         #[cfg(not(unix))]
         {
             let _ = target;
-            bail!("backing up symlink {source} is unsupported on this platform");
+            bail!("backing up symlink {source_label} is unsupported on this platform");
         }
     } else {
-        fs::copy(source_path, &destination).with_context(|| format!("backing up {source}"))?;
+        fs::copy(source, destination).with_context(|| format!("backing up {source_label}"))?;
     }
+
+    Ok(())
+}
+
+fn backup_file(source: &str, name: &str, description: &str) -> Result<()> {
+    warn(&format!("backing up {description}"));
+
+    let source_path = Path::new(source);
+    let destination = backup_path(name);
+
+    backup_file_to(source_path, &destination, source)?;
+
     msg(&format!("backed up {description}"));
     Ok(())
 }
@@ -684,4 +709,90 @@ fn info(text: &str) {
 }
 fn print_usage() {
     println!("Usage: torctl COMMAND\n\nCommands: start stop status restart autowipe autostart ip chngid chngmac rvmac version wipe");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_start_command() {
+        let cli = Cli::try_parse_from(["torctl", "start"]).unwrap();
+
+        assert!(matches!(cli.command, Some(CommandKind::Start)));
+    }
+
+    #[test]
+    fn parses_stop_command() {
+        let cli = Cli::try_parse_from(["torctl", "stop"]).unwrap();
+
+        assert!(matches!(cli.command, Some(CommandKind::Stop)));
+    }
+
+    #[test]
+    fn parses_status_command() {
+        let cli = Cli::try_parse_from(["torctl", "status"]).unwrap();
+
+        assert!(matches!(cli.command, Some(CommandKind::Status)));
+    }
+
+    #[test]
+    fn rejects_unknown_command() {
+        assert!(Cli::try_parse_from(["torctl", "invalid"]).is_err());
+    }
+
+    #[test]
+    fn accepts_no_subcommand() {
+        let cli = Cli::try_parse_from(["torctl"]).unwrap();
+
+        assert!(cli.command.is_none());
+    }
+
+    fn test_dir(name: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+        let path = std::env::temp_dir().join(format!(
+            "torctl-test-{}-{}-{}",
+            name,
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn stage_restore_copies_backup_contents() {
+        let dir = test_dir("restore-success");
+        let backup = dir.join("backup");
+        let temporary = dir.join("temporary");
+
+        fs::write(&backup, b"original configuration").unwrap();
+
+        stage_restore(&backup, &temporary).unwrap();
+
+        assert_eq!(fs::read(&temporary).unwrap(), b"original configuration");
+
+        // Staging must not consume the original backup.
+        assert!(backup.exists());
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn stage_restore_rejects_missing_backup() {
+        let dir = test_dir("restore-missing");
+        let backup = dir.join("missing-backup");
+        let temporary = dir.join("temporary");
+
+        let result = stage_restore(&backup, &temporary);
+
+        assert!(result.is_err());
+        assert!(!temporary.exists());
+
+        fs::remove_dir_all(dir).unwrap();
+    }
 }
