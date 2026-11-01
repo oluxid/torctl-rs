@@ -795,4 +795,83 @@ mod tests {
 
         fs::remove_dir_all(dir).unwrap();
     }
+
+    #[test]
+    fn backup_file_to_copies_contents_and_preserves_source() {
+        let dir = test_dir("backup-success");
+        let source = dir.join("source");
+        let destination = dir.join("backup");
+
+        fs::write(&source, b"original configuration").unwrap();
+
+        backup_file_to(&source, &destination, "test source").unwrap();
+
+        assert_eq!(fs::read(&destination).unwrap(), b"original configuration");
+        assert_eq!(fs::read(&source).unwrap(), b"original configuration");
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn backup_file_to_rejects_missing_source() {
+        let dir = test_dir("backup-missing");
+        let source = dir.join("missing");
+        let destination = dir.join("backup");
+
+        let result = backup_file_to(&source, &destination, "missing source");
+
+        assert!(result.is_err());
+        assert!(!destination.exists());
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn backup_file_to_overwrites_existing_destination() {
+        let dir = test_dir("backup-overwrite");
+        let source = dir.join("source");
+        let destination = dir.join("backup");
+
+        fs::write(&source, b"new configuration").unwrap();
+        fs::write(&destination, b"old configuration").unwrap();
+
+        backup_file_to(&source, &destination, "test source").unwrap();
+
+        assert_eq!(fs::read(&destination).unwrap(), b"new configuration");
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn backup_file_to_preserves_symlink() {
+        use std::os::unix::fs::{symlink, symlink_metadata};
+
+        let dir = test_dir("backup-symlink");
+        let target = dir.join("original-config");
+        let source = dir.join("source-link");
+        let destination = dir.join("backup-link");
+
+        fs::write(&target, b"original configuration").unwrap();
+        symlink(&target, &source).unwrap();
+
+        backup_file_to(&source, &destination, "test symlink").unwrap();
+
+        // The backup must itself be a symlink.
+        assert!(symlink_metadata(&destination)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+
+        // It must point to the same target.
+        assert_eq!(
+            fs::read_link(&destination).unwrap(),
+            fs::read_link(&source).unwrap()
+        );
+
+        // The target contents must remain intact.
+        assert_eq!(fs::read(&target).unwrap(), b"original configuration");
+
+        fs::remove_dir_all(dir).unwrap();
+    }
 }
