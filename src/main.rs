@@ -507,12 +507,25 @@ fn backup_file(source: &str, name: &str, description: &str) -> Result<()> {
 
 fn backup_sysctl() -> Result<()> {
     info("backing up sysctl rules");
+
     let path = backup_path("sysctl.conf.bak");
+
+    backup_sysctl_to(&path, SYSCTL_SETTINGS, |key| {
+        command_output("sysctl", &["-n", key])
+    })
+}
+
+fn backup_sysctl_to<F>(path: &Path, settings: &[(&str, &str)], mut read_value: F) -> Result<()>
+where
+    F: FnMut(&str) -> Result<String>,
+{
     let mut file = fs::File::create(path).context("creating sysctl backup")?;
-    for (key, _) in SYSCTL_SETTINGS {
-        let value = command_output("sysctl", &["-n", key])?;
+
+    for (key, _) in settings {
+        let value = read_value(key)?;
         writeln!(file, "{key} = {}", value.trim()).context("writing sysctl backup")?;
     }
+
     Ok(())
 }
 
@@ -871,6 +884,61 @@ mod tests {
 
         // The target contents must remain intact.
         assert_eq!(fs::read(&target).unwrap(), b"original configuration");
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn backup_sysctl_to_writes_values_in_settings_order() {
+        let dir = test_dir("sysctl-backup-success");
+        let path = dir.join("sysctl.conf.bak");
+
+        let settings = [
+            ("net.ipv4.tcp_ecn", "1"),
+            ("net.core.rmem_max", "16777216"),
+        ];
+
+        backup_sysctl_to(&path, &settings, |key| {
+            match key {
+                "net.ipv4.tcp_ecn" => Ok("0\n".to_owned()),
+                "net.core.rmem_max" => Ok("4096\n".to_owned()),
+                _ => unreachable!("unexpected sysctl key: {key}"),
+            }
+        })
+        .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "net.ipv4.tcp_ecn = 0\nnet.core.rmem_max = 4096\n"
+        );
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn backup_sysctl_to_returns_error_when_value_lookup_fails() {
+        let dir = test_dir("sysctl-backup-failure");
+        let path = dir.join("sysctl.conf.bak");
+
+        let settings = [
+            ("net.ipv4.tcp_ecn", "1"),
+            ("net.core.rmem_max", "16777216"),
+        ];
+
+        let mut calls = 0;
+
+        let result = backup_sysctl_to(&path, &settings, |_key| {
+            calls += 1;
+
+            if calls == 2 {
+                anyhow::bail!("simulated sysctl failure");
+            }
+
+            Ok("0".to_owned())
+        });
+
+        assert!(result.is_err());
+        assert_eq!(calls, 2);
 
         fs::remove_dir_all(dir).unwrap();
     }
